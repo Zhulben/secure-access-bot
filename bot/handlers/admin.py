@@ -20,11 +20,17 @@ from bot.keyboards.admin import (
     PaginationCallback,
     PendingBroadcastCallback,
     UserActionCallback,
+    DeleteBroadcastCallback,
+    HighlightBroadcastCallback,
     get_admin_main_menu,
+    get_admins_list_keyboard,
     get_approval_keyboard,
     get_broadcast_confirm_keyboard,
     get_broadcast_type_keyboard,
+    get_clear_chats_confirm_keyboard,
     get_clear_users_confirm_keyboard,
+    get_delete_broadcasts_keyboard,
+    get_highlight_toggle_keyboard,
     get_custom_or_auto_key_keyboard,
     get_key_actions_keyboard,
     get_key_confirm_delete_keyboard,
@@ -37,12 +43,12 @@ from bot.keyboards.admin import (
     get_users_list_keyboard,
 )
 from bot.keyboards.user import get_cancel_keyboard, remove_keyboard
-from bot.services.admin_service import approve_user, ban_user, reject_user, unban_user
+from bot.services.admin_service import approve_user, ban_user, demote_from_admin, promote_to_admin, reject_user, unban_user
 from bot.services.approval_service import (
     get_all_pending_requests,
     get_pending_request_for_user,
 )
-from bot.services.broadcast_service import create_broadcast, deliver_missed_broadcasts, send_broadcast
+from bot.services.broadcast_service import clear_user_chats, create_broadcast, delete_broadcast_messages, deliver_missed_broadcasts, get_last_broadcasts, send_broadcast, toggle_highlight_broadcast
 from bot.services.key_service import (
     activate_key,
     create_key,
@@ -54,13 +60,16 @@ from bot.services.key_service import (
 from bot.services.user_service import (
     PAGE_SIZE,
     clear_all_users,
+    get_admin_users,
     get_all_users,
     get_user_by_id,
+    get_user_by_telegram_id,
     get_users_by_status,
     get_users_count_by_status,
+    get_pending_users,
     search_users,
 )
-from bot.states.admin import UserSearchStates
+from bot.states.admin import AdminManageStates, UserSearchStates
 from bot.states.broadcast import BroadcastStates
 from bot.states.key_management import KeyCreateStates
 from bot.utils.logger import get_logger
@@ -76,7 +85,7 @@ router = Router(name="admin")
 
 
 @router.message(Command("admin"))
-@router.message(F.text == "Панель администратора")
+@router.message(F.text == "⚙️ Панель администратора")
 async def cmd_admin(message: Message, admin_user: Optional[User]) -> None:
     """Открыть главное меню администратора."""
     if admin_user is None:
@@ -94,7 +103,7 @@ async def cmd_admin(message: Message, admin_user: Optional[User]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.text == "Заявки")
+@router.message(F.text == "📋 Заявки")
 async def show_pending_requests(
     message: Message,
     session: AsyncSession,
@@ -105,9 +114,6 @@ async def show_pending_requests(
         return
 
     requests = await get_all_pending_requests(session)
-    if not requests:
-        await message.answer("Нет ожидающих заявок.", reply_markup=get_admin_main_menu())
-        return
 
     # Загружаем данные пользователей для отображения
     items: list[tuple[int, str, int]] = []
@@ -116,8 +122,21 @@ async def show_pending_requests(
         if user:
             items.append((req.id, user.display_name, user.id))
 
+    # Пользователи в статусе PENDING, но без заявки (не завершили регистрацию)
+    all_pending_users = await get_pending_users(session)
+    pending_user_ids_with_request = {req.user_id for req in requests}
+    stuck_count = sum(1 for u in all_pending_users if u.id not in pending_user_ids_with_request)
+
+    text = f"Заявки на рассмотрении: {len(items)}"
+    if stuck_count:
+        text += f"\n\n⚠️ Ещё {stuck_count} чел. начали регистрацию, но не завершили её (заявки нет)."
+
+    if not items:
+        await message.answer(text or "Нет ожидающих заявок.", reply_markup=get_admin_main_menu())
+        return
+
     await message.answer(
-        f"Заявки на рассмотрении: {len(items)}",
+        text,
         reply_markup=get_pending_requests_keyboard(items),
     )
 
@@ -285,7 +304,7 @@ async def back_to_requests(
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.text == "Пользователи")
+@router.message(F.text == "👥 Пользователи")
 async def show_all_users(
     message: Message,
     session: AsyncSession,
@@ -420,7 +439,7 @@ async def unban_user_callback(
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.text == "Ключи")
+@router.message(F.text == "🔑 Ключи")
 async def show_keys(
     message: Message,
     session: AsyncSession,
@@ -869,7 +888,7 @@ async def back_to_keys(
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.text == "Рассылка")
+@router.message(F.text == "📢 Рассылка")
 async def start_broadcast(
     message: Message,
     state: FSMContext,
@@ -1095,6 +1114,92 @@ async def execute_broadcast(
         reply_markup=get_admin_main_menu(),
     )
 
+    # Отправить превью рассылки с кнопкой выделения
+    try:
+        if broadcast.broadcast_type == BroadcastType.TEXT:
+            await bot.send_message(
+                chat_id=admin_user.telegram_id,
+                text=f"📋 Превью рассылки:\n\n{broadcast.text or ''}",
+                reply_markup=get_highlight_toggle_keyboard(broadcast.id, broadcast.is_highlighted),
+            )
+        elif broadcast.broadcast_type == BroadcastType.PHOTO:
+            await bot.send_photo(
+                chat_id=admin_user.telegram_id,
+                photo=broadcast.photo_file_id or "",
+                caption="📋 Превью рассылки:",
+                reply_markup=get_highlight_toggle_keyboard(broadcast.id, broadcast.is_highlighted),
+            )
+        elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
+            await bot.send_photo(
+                chat_id=admin_user.telegram_id,
+                photo=broadcast.photo_file_id or "",
+                caption=f"📋 Превью рассылки:\n\n{broadcast.text or ''}",
+                reply_markup=get_highlight_toggle_keyboard(broadcast.id, broadcast.is_highlighted),
+            )
+    except Exception as e:
+        logger.error("Не удалось отправить превью рассылки: %s", e)
+
+
+@router.callback_query(HighlightBroadcastCallback.filter())
+async def toggle_highlight_callback(
+    call: CallbackQuery,
+    callback_data: HighlightBroadcastCallback,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Переключить выделение рассылки прямо в чате."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    new_value = await toggle_highlight_broadcast(session, callback_data.broadcast_id)
+    status = "добавлено в актуальное ✅" if new_value else "убрано из актуального ◻️"
+    await call.answer(status, show_alert=False)
+    await call.message.edit_reply_markup(
+        reply_markup=get_highlight_toggle_keyboard(callback_data.broadcast_id, new_value)
+    )
+
+
+@router.message(F.text == "📌 Актуальные")
+async def show_highlighted_admin(
+    message: Message,
+    session: AsyncSession,
+    bot: Bot,
+    admin_user: Optional[User],
+) -> None:
+    """Показать все актуальные рассылки с кнопкой снятия выделения."""
+    if admin_user is None:
+        return
+    from bot.services.broadcast_service import get_highlighted_broadcasts
+    from bot.database.enums import BroadcastType
+    broadcasts = await get_highlighted_broadcasts(session)
+    if not broadcasts:
+        await message.answer("Актуальных сообщений нет.", reply_markup=get_admin_main_menu())
+        return
+    await message.answer(f"Актуальные сообщения ({len(broadcasts)}). Нажмите на кнопку под сообщением чтобы убрать из актуальных:")
+    for broadcast in broadcasts:
+        try:
+            if broadcast.broadcast_type == BroadcastType.TEXT:
+                await bot.send_message(
+                    chat_id=admin_user.telegram_id,
+                    text=broadcast.text or "",
+                    reply_markup=get_highlight_toggle_keyboard(broadcast.id, True),
+                )
+            elif broadcast.broadcast_type == BroadcastType.PHOTO:
+                await bot.send_photo(
+                    chat_id=admin_user.telegram_id,
+                    photo=broadcast.photo_file_id or "",
+                    reply_markup=get_highlight_toggle_keyboard(broadcast.id, True),
+                )
+            elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
+                await bot.send_photo(
+                    chat_id=admin_user.telegram_id,
+                    photo=broadcast.photo_file_id or "",
+                    caption=broadcast.text or "",
+                    reply_markup=get_highlight_toggle_keyboard(broadcast.id, True),
+                )
+        except Exception as e:
+            logger.error("Не удалось отправить актуальное сообщение id=%s: %s", broadcast.id, e)
+
 
 @router.callback_query(BroadcastActionCallback.filter(F.action == "cancel"))
 async def cancel_broadcast(
@@ -1115,7 +1220,7 @@ async def cancel_broadcast(
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.text == "Статистика")
+@router.message(F.text == "📊 Статистика")
 async def show_statistics(
     message: Message,
     session: AsyncSession,
@@ -1193,11 +1298,235 @@ async def process_user_search(
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
+# Управление администраторами
+# ---------------------------------------------------------------------------
+
+
+@router.message(F.text == "🛡 Администраторы")
+async def show_admins(
+    message: Message,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Показать список администраторов."""
+    if admin_user is None:
+        return
+
+    from bot.utils.security import get_admin_ids
+    env_ids = get_admin_ids()
+
+    db_admins = await get_admin_users(session)
+    items: list[tuple[int, str, bool]] = [
+        (u.id, u.display_name, u.telegram_id in env_ids) for u in db_admins
+    ]
+
+    text = "Администраторы:\n\n⭐ — из .env (постоянные)\n🔑 — добавлены через панель (нажми чтобы снять права)"
+    await message.answer(text, reply_markup=get_admins_list_keyboard(items))
+
+
+@router.callback_query(F.data == "admin_add")
+async def add_admin_prompt(
+    call: CallbackQuery,
+    state: FSMContext,
+    admin_user: Optional[User],
+) -> None:
+    """Запросить Telegram ID нового администратора."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    await call.message.answer(
+        "Введите Telegram ID пользователя, которого хотите сделать администратором:",
+        reply_markup=get_cancel_keyboard(),
+    )
+    await state.set_state(AdminManageStates.waiting_telegram_id)
+    await call.answer()
+
+
+@router.message(AdminManageStates.waiting_telegram_id, F.text == "Отмена")
+async def cancel_add_admin(message: Message, state: FSMContext) -> None:
+    """Отменить добавление администратора."""
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=get_admin_main_menu())
+
+
+@router.message(AdminManageStates.waiting_telegram_id)
+async def process_add_admin(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Обработать ввод Telegram ID и повысить пользователя до администратора."""
+    if admin_user is None:
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer(
+            "Telegram ID должен состоять только из цифр. Попробуйте ещё раз:",
+            reply_markup=get_cancel_keyboard(),
+        )
+        return
+
+    telegram_id = int(raw)
+    user = await get_user_by_telegram_id(session, telegram_id)
+    if user is None:
+        await message.answer(
+            f"Пользователь с Telegram ID {telegram_id} не найден в базе.\n"
+            "Он должен сначала написать боту.",
+            reply_markup=get_admin_main_menu(),
+        )
+        await state.clear()
+        return
+
+    await promote_to_admin(session, user, admin_user)
+    await state.clear()
+    await message.answer(
+        f"Готово! {user.display_name} теперь администратор.",
+        reply_markup=get_admin_main_menu(),
+    )
+    logger.info(
+        "Администратор tg_id=%s добавил нового администратора tg_id=%s",
+        admin_user.telegram_id, telegram_id,
+    )
+
+
+@router.callback_query(UserActionCallback.filter(F.action == "demote"))
+async def demote_admin_callback(
+    call: CallbackQuery,
+    callback_data: UserActionCallback,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Снять права администратора."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+
+    user = await get_user_by_id(session, callback_data.user_id)
+    if user is None:
+        await call.answer("Пользователь не найден.", show_alert=True)
+        return
+
+    if user.id == admin_user.id:
+        await call.answer("Нельзя снять права у самого себя.", show_alert=True)
+        return
+
+    await demote_from_admin(session, user, admin_user)
+    await call.message.edit_text(
+        f"Права администратора сняты: {user.display_name}."
+    )
+    await call.answer()
+
+
+@router.callback_query(UserActionCallback.filter(F.action == "admin_info"))
+async def admin_info_callback(call: CallbackQuery) -> None:
+    """Информация о постоянном администраторе из .env."""
+    await call.answer("Этот администратор задан в .env и не может быть изменён через панель.", show_alert=True)
+
+
+# ---------------------------------------------------------------------------
+# Удаление рассылок из чатов пользователей
+# ---------------------------------------------------------------------------
+
+
+@router.message(F.text == "🗑 Удалить рассылки")
+async def delete_broadcasts_prompt(
+    message: Message,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Показать последние рассылки для выбора удаления."""
+    if admin_user is None:
+        return
+    broadcasts = await get_last_broadcasts(session, limit=5)
+    if not broadcasts:
+        await message.answer("Рассылок ещё не было.")
+        return
+    await message.answer(
+        "Выберите рассылку — будут удалены она и все более ранние до неё включительно:",
+        reply_markup=get_delete_broadcasts_keyboard(broadcasts),
+    )
+
+
+@router.callback_query(DeleteBroadcastCallback.filter())
+async def delete_broadcasts_confirmed(
+    call: CallbackQuery,
+    callback_data: DeleteBroadcastCallback,
+    session: AsyncSession,
+    bot: Bot,
+    admin_user: Optional[User],
+) -> None:
+    """Удалить последние N рассылок из чатов пользователей."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    await call.message.edit_text("Удаляю сообщения...")
+    stats = await delete_broadcast_messages(bot, session, callback_data.count)
+    await call.message.edit_text(
+        f"Готово.\nУдалено сообщений: {stats['deleted']}\nНе удалось: {stats['failed']}"
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "delete_broadcast_cancel")
+async def delete_broadcasts_cancel(call: CallbackQuery) -> None:
+    await call.message.edit_text("Отменено.")
+    await call.answer()
+
+
+# ---------------------------------------------------------------------------
+# Очистка чатов со всеми пользователями
+# ---------------------------------------------------------------------------
+
+
+@router.message(F.text == "💬 Очистить чаты")
+async def clear_chats_prompt(
+    message: Message,
+    admin_user: Optional[User],
+) -> None:
+    """Запросить подтверждение перед очисткой чатов."""
+    if admin_user is None:
+        return
+    await message.answer(
+        "Будут удалены все сообщения бота во всех чатах с одобренными пользователями.\n"
+        "Это действие необратимо. Продолжить?",
+        reply_markup=get_clear_chats_confirm_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "clear_chats_confirm")
+async def clear_chats_confirmed(
+    call: CallbackQuery,
+    session: AsyncSession,
+    bot: Bot,
+    admin_user: Optional[User],
+) -> None:
+    """Запустить очистку чатов."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    await call.message.edit_text("Очищаю чаты...")
+    await call.answer()
+    stats = await clear_user_chats(bot, session)
+    await call.message.edit_text(
+        f"Готово.\nСообщений удалено: {stats['deleted']}\nОшибок: {stats['failed']}"
+    )
+
+
+@router.callback_query(F.data == "clear_chats_cancel")
+async def clear_chats_cancelled(call: CallbackQuery) -> None:
+    await call.message.edit_text("Отменено.")
+    await call.answer()
+
+
+# ---------------------------------------------------------------------------
 # Очистка всех пользователей
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.text == "Очистить пользователей")
+@router.message(F.text == "🧹 Очистить пользователей")
 async def clear_users_prompt(
     message: Message,
     admin_user: Optional[User],

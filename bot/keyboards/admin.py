@@ -52,14 +52,97 @@ class PendingBroadcastCallback(CallbackData, prefix="pbc"):
 def get_admin_main_menu() -> ReplyKeyboardMarkup:
     """Reply-клавиатура главного меню администратора."""
     builder = ReplyKeyboardBuilder()
-    builder.button(text="Заявки")
-    builder.button(text="Пользователи")
-    builder.button(text="Ключи")
-    builder.button(text="Рассылка")
-    builder.button(text="Статистика")
-    builder.button(text="Очистить пользователей")
-    builder.adjust(2, 2, 1, 1)
+    builder.button(text="📋 Заявки")
+    builder.button(text="👥 Пользователи")
+    builder.button(text="🔑 Ключи")
+    builder.button(text="📢 Рассылка")
+    builder.button(text="📊 Статистика")
+    builder.button(text="🛡 Администраторы")
+    builder.button(text="📌 Актуальные")
+    builder.button(text="🗑 Удалить рассылки")
+    builder.button(text="💬 Очистить чаты")
+    builder.button(text="🧹 Очистить пользователей")
+    builder.adjust(2, 2, 2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
+
+
+def get_admins_list_keyboard(
+    admins: list[tuple[int, str, bool]],  # [(user_id, display_name, is_env_admin), ...]
+) -> InlineKeyboardMarkup:
+    """Список администраторов с кнопкой снятия прав."""
+    builder = InlineKeyboardBuilder()
+    for user_id, name, is_env_admin in admins:
+        if is_env_admin:
+            builder.button(
+                text=f"⭐ {name}",
+                callback_data=UserActionCallback(action="admin_info", user_id=user_id),
+            )
+        else:
+            builder.button(
+                text=f"🔑 {name}",
+                callback_data=UserActionCallback(action="demote", user_id=user_id),
+            )
+    builder.button(text="➕ Добавить администратора", callback_data="admin_add")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+class DeleteBroadcastCallback(CallbackData, prefix="delbr"):
+    """Удаление последних N рассылок."""
+    count: int
+
+
+class HighlightBroadcastCallback(CallbackData, prefix="hlbr"):
+    """Переключение выделения рассылки."""
+    broadcast_id: int
+
+
+
+
+def get_highlight_toggle_keyboard(broadcast_id: int, is_highlighted: bool) -> InlineKeyboardMarkup:
+    """Кнопка-тогл под сообщением рассылки для админа."""
+    builder = InlineKeyboardBuilder()
+    if is_highlighted:
+        builder.button(
+            text="✅ Актуально — нажми чтобы убрать",
+            callback_data=HighlightBroadcastCallback(broadcast_id=broadcast_id),
+        )
+    else:
+        builder.button(
+            text="📌 Сделать актуальным",
+            callback_data=HighlightBroadcastCallback(broadcast_id=broadcast_id),
+        )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_delete_broadcasts_keyboard(broadcasts: list) -> InlineKeyboardMarkup:
+    """Список последних рассылок с кнопками удаления каждой."""
+    from datetime import timezone
+    builder = InlineKeyboardBuilder()
+    for i, bc in enumerate(broadcasts, 1):
+        created = bc.created_at
+        if created and created.tzinfo is None:
+            from datetime import timezone
+            created = created.replace(tzinfo=timezone.utc)
+        date_str = created.strftime("%d.%m %H:%M") if created else "—"
+        type_icon = {"text": "📝", "photo": "🖼", "photo_caption": "🖼📝"}.get(bc.broadcast_type, "📨")
+        builder.button(
+            text=f"🗑 {type_icon} Рассылка от {date_str}",
+            callback_data=DeleteBroadcastCallback(count=i),
+        )
+    builder.button(text="Отмена", callback_data="delete_broadcast_cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_clear_chats_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Подтверждение очистки чатов всех пользователей."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Да, очистить все чаты", callback_data="clear_chats_confirm")
+    builder.button(text="Отмена", callback_data="clear_chats_cancel")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def get_clear_users_confirm_keyboard() -> InlineKeyboardMarkup:

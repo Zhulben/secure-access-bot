@@ -45,7 +45,7 @@ async def text_cancel(message: Message, state: FSMContext) -> None:
     await cmd_cancel(message, state)
 
 
-@router.message(F.text == "Мой профиль")
+@router.message(F.text == "👤 Мой профиль")
 async def cmd_profile(message: Message, session: AsyncSession) -> None:
     """Показать профиль пользователя."""
     user = await get_user_by_telegram_id(session, message.from_user.id)
@@ -76,7 +76,7 @@ async def cmd_profile(message: Message, session: AsyncSession) -> None:
     await message.answer(text)
 
 
-@router.message(F.text == "Помощь")
+@router.message(F.text == "❓ Помощь")
 async def text_help(message: Message) -> None:
     """Помощь через reply-кнопку."""
     await cmd_help(message)

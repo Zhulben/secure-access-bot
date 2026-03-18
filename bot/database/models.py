@@ -253,6 +253,7 @@ class Broadcast(Base):
 
     # Настройки рассылки
     send_to_pending_masked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_highlighted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # created_at унаследован от Base
     updated_at: Mapped[Optional[datetime]] = mapped_column(  # type: ignore[assignment]
@@ -283,6 +284,7 @@ class DeliveryLog(Base):
     )
     delivery_mode: Mapped[DeliveryMode] = mapped_column(String(16), nullable=False)
     delivery_status: Mapped[DeliveryStatus] = mapped_column(String(16), nullable=False)
+    message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     error_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     delivered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, server_default=func.now(), nullable=False

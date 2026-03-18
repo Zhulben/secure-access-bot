@@ -158,6 +158,14 @@ async def get_users_count_by_status(session: AsyncSession) -> dict[str, int]:
     return {str(row[0]): row[1] for row in result.all()}
 
 
+async def get_admin_users(session: AsyncSession) -> list[User]:
+    """Получить всех пользователей с ролью ADMIN."""
+    result = await session.execute(
+        select(User).where(User.role == UserRole.ADMIN).order_by(User.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
 async def clear_all_users(session: AsyncSession, except_telegram_id: int) -> int:
     """Удалить всех пользователей кроме указанного. Возвращает количество удалённых."""
     result = await session.execute(

@@ -62,8 +62,8 @@ async def send_broadcast(
     approved_users = await get_approved_users(session)
 
     for user in approved_users:
-        status, error = await _send_real_message(bot, broadcast, user)
-        await _log_delivery(session, broadcast, user, DeliveryMode.REAL, status, error)
+        status, error, message_id = await _send_real_message(bot, broadcast, user)
+        await _log_delivery(session, broadcast, user, DeliveryMode.REAL, status, error, message_id)
         if status == DeliveryStatus.SUCCESS:
             stats["success"] += 1
         else:
@@ -93,52 +93,48 @@ async def _send_real_message(
     bot: Bot,
     broadcast: Broadcast,
     user: User,
-) -> tuple[DeliveryStatus, Optional[str]]:
-    """Отправить реальный контент одному пользователю."""
+) -> tuple[DeliveryStatus, Optional[str], Optional[int]]:
+    """Отправить реальный контент одному пользователю. Возвращает (status, error, message_id)."""
     try:
         if broadcast.broadcast_type == BroadcastType.TEXT:
-            await bot.send_message(
-                chat_id=user.telegram_id,
-                text=broadcast.text or "",
-            )
+            msg = await bot.send_message(chat_id=user.telegram_id, text=broadcast.text or "")
         elif broadcast.broadcast_type == BroadcastType.PHOTO:
-            await bot.send_photo(
-                chat_id=user.telegram_id,
-                photo=broadcast.photo_file_id or "",
-            )
+            msg = await bot.send_photo(chat_id=user.telegram_id, photo=broadcast.photo_file_id or "")
         elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
-            await bot.send_photo(
+            msg = await bot.send_photo(
                 chat_id=user.telegram_id,
                 photo=broadcast.photo_file_id or "",
                 caption=broadcast.text or "",
             )
-        return DeliveryStatus.SUCCESS, None
+        else:
+            return DeliveryStatus.FAILED, "Неизвестный тип рассылки", None
+        return DeliveryStatus.SUCCESS, None, msg.message_id
 
     except TelegramForbiddenError:
-        # Пользователь заблокировал бота
-        return DeliveryStatus.FAILED, "Пользователь заблокировал бота"
+        return DeliveryStatus.FAILED, "Пользователь заблокировал бота", None
 
     except TelegramRetryAfter as e:
-        # Flood control — ждём и повторяем один раз
         logger.warning("Flood control, жду %s секунд", e.retry_after)
         await asyncio.sleep(e.retry_after)
         try:
             if broadcast.broadcast_type == BroadcastType.TEXT:
-                await bot.send_message(chat_id=user.telegram_id, text=broadcast.text or "")
+                msg = await bot.send_message(chat_id=user.telegram_id, text=broadcast.text or "")
             elif broadcast.broadcast_type == BroadcastType.PHOTO:
-                await bot.send_photo(chat_id=user.telegram_id, photo=broadcast.photo_file_id or "")
+                msg = await bot.send_photo(chat_id=user.telegram_id, photo=broadcast.photo_file_id or "")
             elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
-                await bot.send_photo(
+                msg = await bot.send_photo(
                     chat_id=user.telegram_id,
                     photo=broadcast.photo_file_id or "",
                     caption=broadcast.text or "",
                 )
-            return DeliveryStatus.SUCCESS, None
+            else:
+                return DeliveryStatus.FAILED, "Неизвестный тип рассылки", None
+            return DeliveryStatus.SUCCESS, None, msg.message_id
         except TelegramAPIError as retry_err:
-            return DeliveryStatus.FAILED, str(retry_err)
+            return DeliveryStatus.FAILED, str(retry_err), None
 
     except TelegramAPIError as e:
-        return DeliveryStatus.FAILED, str(e)
+        return DeliveryStatus.FAILED, str(e), None
 
 
 async def _send_masked_message(
@@ -166,6 +162,7 @@ async def _log_delivery(
     mode: DeliveryMode,
     status: DeliveryStatus,
     error: Optional[str],
+    message_id: Optional[int] = None,
 ) -> None:
     """Записать результат доставки в БД."""
     log = DeliveryLog(
@@ -173,22 +170,100 @@ async def _log_delivery(
         user_id=user.id,
         delivery_mode=mode,
         delivery_status=status,
+        message_id=message_id,
         error_text=error,
     )
     session.add(log)
     # Не делаем flush здесь — накапливаем и flush в конце рассылки
 
 
+async def get_highlighted_broadcasts(session: AsyncSession) -> list:
+    """Получить все выделенные рассылки (от старых к новым)."""
+    from sqlalchemy import select
+    from bot.database.models import Broadcast
+    result = await session.execute(
+        select(Broadcast)
+        .where(Broadcast.is_highlighted == True)
+        .order_by(Broadcast.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def toggle_highlight_broadcast(session: AsyncSession, broadcast_id: int) -> bool:
+    """Переключить выделение рассылки. Возвращает новое значение."""
+    from sqlalchemy import select
+    from bot.database.models import Broadcast
+    result = await session.execute(select(Broadcast).where(Broadcast.id == broadcast_id))
+    broadcast = result.scalar_one_or_none()
+    if broadcast is None:
+        return False
+    broadcast.is_highlighted = not broadcast.is_highlighted
+    await session.flush()
+    return broadcast.is_highlighted
+
+
 async def get_last_broadcasts(session: AsyncSession, limit: int = 5) -> list:
-    """Получить последние N рассылок администратора."""
+    """Получить последние N рассылок (от старых к новым)."""
     from sqlalchemy import select
     from bot.database.models import Broadcast
     result = await session.execute(
         select(Broadcast).order_by(Broadcast.created_at.desc()).limit(limit)
     )
     broadcasts = list(result.scalars().all())
-    broadcasts.reverse()  # от старых к новым
+    broadcasts.reverse()
     return broadcasts
+
+
+async def delete_broadcast_messages(
+    bot: Bot,
+    session: AsyncSession,
+    count: int,
+) -> dict[str, int]:
+    """
+    Удалить сообщения последних N рассылок из чатов всех получателей.
+    Возвращает {"deleted": N, "failed": N}.
+    """
+    from sqlalchemy import select
+    from bot.database.models import Broadcast, DeliveryLog
+    from bot.database.enums import DeliveryMode, DeliveryStatus
+
+    # Найти последние count рассылок
+    result = await session.execute(
+        select(Broadcast).order_by(Broadcast.created_at.desc()).limit(count)
+    )
+    broadcasts = list(result.scalars().all())
+    if not broadcasts:
+        return {"deleted": 0, "failed": 0}
+
+    broadcast_ids = [b.id for b in broadcasts]
+
+    # Найти все delivery_logs с message_id для этих рассылок
+    logs_result = await session.execute(
+        select(DeliveryLog).where(
+            DeliveryLog.broadcast_id.in_(broadcast_ids),
+            DeliveryLog.delivery_mode == DeliveryMode.REAL,
+            DeliveryLog.delivery_status == DeliveryStatus.SUCCESS,
+            DeliveryLog.message_id.is_not(None),
+        )
+    )
+    logs = list(logs_result.scalars().all())
+
+    stats = {"deleted": 0, "failed": 0}
+    for log in logs:
+        # Получаем telegram_id пользователя
+        from bot.services.user_service import get_user_by_id
+        user = await get_user_by_id(session, log.user_id)
+        if user is None:
+            continue
+        try:
+            await bot.delete_message(chat_id=user.telegram_id, message_id=log.message_id)
+            stats["deleted"] += 1
+        except Exception:
+            stats["failed"] += 1
+        await asyncio.sleep(SEND_DELAY_MS / 1000)
+
+    logger.info("Удалено сообщений рассылок: %s", stats)
+    return stats
 
 
 async def deliver_missed_broadcasts(
@@ -221,8 +296,8 @@ async def deliver_missed_broadcasts(
 
     sent = 0
     for broadcast in missed:
-        status, error = await _send_real_message(bot, broadcast, user)
-        await _log_delivery(session, broadcast, user, DeliveryMode.REAL, status, error)
+        status, error, message_id = await _send_real_message(bot, broadcast, user)
+        await _log_delivery(session, broadcast, user, DeliveryMode.REAL, status, error, message_id)
         if status == DeliveryStatus.SUCCESS:
             sent += 1
         await asyncio.sleep(SEND_DELAY_MS / 1000)
@@ -234,6 +309,49 @@ async def deliver_missed_broadcasts(
             user.telegram_id, sent,
         )
     return sent
+
+
+async def clear_user_chats(
+    bot: Bot,
+    session: AsyncSession,
+) -> dict[str, int]:
+    """
+    Полная очистка всей истории чата бота с каждым одобренным пользователем.
+    Отправляет зондовое сообщение, узнаёт max_id, удаляет все сообщения батчами по 100.
+    """
+    from bot.services.user_service import get_approved_users
+
+    users = await get_approved_users(session)
+    stats = {"deleted": 0, "failed": 0}
+
+    for user in users:
+        try:
+            probe = await bot.send_message(chat_id=user.telegram_id, text=".")
+            max_id = probe.message_id
+            await bot.delete_message(chat_id=user.telegram_id, message_id=max_id)
+
+            # Удаляем батчами по 100 — Telegram поддерживает до 100 за раз
+            all_ids = list(range(max_id - 1, 0, -1))
+            for i in range(0, len(all_ids), 100):
+                batch = all_ids[i:i + 100]
+                try:
+                    await bot.delete_messages(chat_id=user.telegram_id, message_ids=batch)
+                    stats["deleted"] += len(batch)
+                except Exception:
+                    # Если батч не прошёл — пробуем поштучно
+                    for msg_id in batch:
+                        try:
+                            await bot.delete_message(chat_id=user.telegram_id, message_id=msg_id)
+                            stats["deleted"] += 1
+                        except Exception:
+                            stats["failed"] += 1
+
+        except Exception as e:
+            logger.warning("Не удалось очистить чат с tg_id=%s: %s", user.telegram_id, e)
+            stats["failed"] += 1
+
+    logger.info("Очистка чатов завершена: %s", stats)
+    return stats
 
 
 async def get_broadcast_stats(session: AsyncSession, broadcast_id: int) -> dict[str, int]:

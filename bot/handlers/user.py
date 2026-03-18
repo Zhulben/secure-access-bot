@@ -18,7 +18,7 @@ from bot.keyboards.user import (
 )
 from bot.services.approval_service import create_approval_request, get_pending_request_for_user
 from bot.services.auth_service import is_user_banned
-from bot.services.broadcast_service import get_last_broadcasts
+from bot.services.broadcast_service import get_highlighted_broadcasts, get_last_broadcasts
 from bot.services.key_service import validate_key_for_user
 from bot.services.user_service import (
     get_or_create_user,
@@ -273,7 +273,37 @@ async def process_key(
 # ---------------------------------------------------------------------------
 
 
-@router.message(F.text == "Последние сообщения")
+@router.message(F.text == "📌 Актуальное")
+async def show_highlighted(
+    message: Message,
+    session: AsyncSession,
+    bot: Bot,
+) -> None:
+    """Показать все актуальные (выделенные) сообщения администратора."""
+    broadcasts = await get_highlighted_broadcasts(session)
+    if not broadcasts:
+        await message.answer("Актуальных сообщений пока нет.")
+        return
+
+    await message.answer(f"Актуальные сообщения ({len(broadcasts)}):")
+    from bot.database.enums import BroadcastType
+    for broadcast in broadcasts:
+        try:
+            if broadcast.broadcast_type == BroadcastType.TEXT:
+                await bot.send_message(chat_id=message.from_user.id, text=broadcast.text or "")
+            elif broadcast.broadcast_type == BroadcastType.PHOTO:
+                await bot.send_photo(chat_id=message.from_user.id, photo=broadcast.photo_file_id or "")
+            elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
+                await bot.send_photo(
+                    chat_id=message.from_user.id,
+                    photo=broadcast.photo_file_id or "",
+                    caption=broadcast.text or "",
+                )
+        except Exception:
+            pass
+
+
+@router.message(F.text == "📨 Последние сообщения")
 async def show_last_messages(
     message: Message,
     session: AsyncSession,

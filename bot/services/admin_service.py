@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.enums import UserStatus
+from bot.database.enums import UserRole, UserStatus
 from bot.database.models import ApprovalRequest, User
 from bot.services.approval_service import approve_request, reject_request
 from bot.services.key_service import record_key_usage
@@ -79,6 +79,27 @@ async def ban_user(session: AsyncSession, user: User, admin: User) -> None:
     await session.flush()
     logger.info(
         "Пользователь tg_id=%s заблокирован администратором tg_id=%s",
+        user.telegram_id, admin.telegram_id,
+    )
+
+
+async def promote_to_admin(session: AsyncSession, user: User, admin: User) -> None:
+    """Повысить пользователя до администратора."""
+    user.role = UserRole.ADMIN
+    user.status = UserStatus.APPROVED
+    await session.flush()
+    logger.info(
+        "Пользователь tg_id=%s повышен до администратора администратором tg_id=%s",
+        user.telegram_id, admin.telegram_id,
+    )
+
+
+async def demote_from_admin(session: AsyncSession, user: User, admin: User) -> None:
+    """Снять права администратора у пользователя."""
+    user.role = UserRole.USER
+    await session.flush()
+    logger.info(
+        "Пользователь tg_id=%s лишён прав администратора администратором tg_id=%s",
         user.telegram_id, admin.telegram_id,
     )
 

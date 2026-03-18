@@ -10,3 +10,8 @@ class AdminConfirmStates(StatesGroup):
 class UserSearchStates(StatesGroup):
     """Поиск пользователя."""
     waiting_query = State()     # Ввод запроса (username или telegram_id)
+
+
+class AdminManageStates(StatesGroup):
+    """Добавление нового администратора."""
+    waiting_telegram_id = State()   # Ввод Telegram ID нового администратора

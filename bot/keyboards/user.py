@@ -29,10 +29,11 @@ def get_registration_start_keyboard() -> InlineKeyboardMarkup:
 def get_user_main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Главное меню одобренного пользователя."""
     builder = ReplyKeyboardBuilder()
-    builder.button(text="Мой профиль")
-    builder.button(text="Последние сообщения")
-    builder.button(text="Помощь")
+    builder.button(text="👤 Мой профиль")
+    builder.button(text="📌 Актуальное")
+    builder.button(text="📨 Последние сообщения")
+    builder.button(text="❓ Помощь")
     if is_admin:
-        builder.button(text="Панель администратора")
+        builder.button(text="⚙️ Панель администратора")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
