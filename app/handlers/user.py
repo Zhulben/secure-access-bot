@@ -16,7 +16,7 @@ from app.db import (
     upsert_user,
 )
 from app.keyboards import admin_main_kb, approve_user_kb, user_main_kb
-from app.states import RegisterState
+from app.states import EnterKeyState, RegisterState
 from app.utils import fmt_dt, hash_key
 
 user_router = Router()
@@ -28,7 +28,8 @@ async def notify_admins(bot, tg_id: int, username: str | None, first_name: str, 
         f"ID: <code>{tg_id}</code>\n"
         f"Username: @{username if username else '-'}\n"
         f"Имя: {first_name}\n"
-        f"Фамилия: {last_name}"
+        f"Фамилия: {last_name}\n"
+        f"🔑 Ключ проверен"
     )
     for admin_id in ADMIN_IDS:
         try:
@@ -53,7 +54,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             if await has_valid_access(message.from_user.id):
                 await message.answer("✅ Доступ активен.", reply_markup=user_main_kb())
             else:
-                await message.answer("🔑 Введите ключ командой:\n/key ВАШ_КЛЮЧ", reply_markup=user_main_kb())
+                await message.answer("🔒 Доступ истёк. Нажмите «🔑 Ввести ключ» для продления.", reply_markup=user_main_kb())
             return
         if status == "banned":
             await message.answer("⛔ Вам запрещён доступ к боту.")
@@ -81,16 +82,29 @@ async def get_last_name(message: Message, state: FSMContext) -> None:
         await message.answer("Фамилия слишком короткая. Введите ещё раз.")
         return
 
+    await state.update_data(last_name=last_name)
+    await message.answer("Введите ключ доступа:")
+    await state.set_state(RegisterState.waiting_key)
+
+
+@user_router.message(RegisterState.waiting_key)
+async def get_key_for_register(message: Message, state: FSMContext) -> None:
+    raw_key = (message.text or "").strip()
+    key = await find_active_key_by_hash(hash_key(raw_key))
+    if not key:
+        await message.answer("❌ Ключ неверный или истёк. Введите другой ключ:")
+        return
+
     data = await state.get_data()
-    first_name = data["first_name"]
     await upsert_user(
         tg_id=message.from_user.id,
         username=message.from_user.username,
-        first_name=first_name,
-        last_name=last_name,
+        first_name=data["first_name"],
+        last_name=data["last_name"],
+        pending_key_id=key["id"],
     )
-    await notify_admins(message.bot, message.from_user.id, message.from_user.username, first_name, last_name)
-    await message.answer("⏳ Заявка отправлена администратору.")
+    await notify_admins(message.bot, message.from_user.id, message.from_user.username, data["first_name"], data["last_name"])
+    await message.answer("✅ Ключ принят. Заявка отправлена администратору. Ожидайте подтверждения.")
     await state.clear()
 
 
@@ -117,8 +131,31 @@ async def cmd_key(message: Message, command: CommandObject) -> None:
 
 
 @user_router.message(F.text == "🔑 Ввести ключ")
-async def enter_key_hint(message: Message) -> None:
-    await message.answer("Введите ключ командой:\n/key ВАШ_КЛЮЧ")
+async def enter_key_button(message: Message, state: FSMContext) -> None:
+    user = await get_user(message.from_user.id)
+    if not user or user["status"] != "approved":
+        await message.answer("⏳ Вы ещё не подтверждены администратором.")
+        return
+    await message.answer("Введите ключ:")
+    await state.set_state(EnterKeyState.waiting_key)
+
+
+@user_router.message(EnterKeyState.waiting_key)
+async def enter_key_fsm_handler(message: Message, state: FSMContext) -> None:
+    raw_key = (message.text or "").strip()
+    if not raw_key:
+        await message.answer("Ключ не может быть пустым.")
+        return
+
+    key = await find_active_key_by_hash(hash_key(raw_key))
+    if not key:
+        await message.answer("❌ Ключ неверный или истёк.")
+        await state.clear()
+        return
+
+    await grant_daily_access(message.from_user.id, key["id"])
+    await message.answer("✅ Доступ открыт на 24 часа.", reply_markup=user_main_kb())
+    await state.clear()
 
 
 @user_router.message(F.text == "ℹ️ Мой статус")

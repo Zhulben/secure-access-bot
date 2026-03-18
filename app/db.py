@@ -80,23 +80,33 @@ async def init_db() -> None:
             await cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
             await cur.execute("CREATE INDEX IF NOT EXISTS idx_access_keys_valid_to ON access_keys(valid_to)")
             await cur.execute("CREATE INDEX IF NOT EXISTS idx_photos_created_at ON photos(created_at DESC)")
+            await cur.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_key_id BIGINT REFERENCES access_keys(id) ON DELETE SET NULL"
+            )
         await conn.commit()
 
 
-async def upsert_user(tg_id: int, username: str | None, first_name: str, last_name: str) -> None:
+async def upsert_user(
+    tg_id: int,
+    username: str | None,
+    first_name: str,
+    last_name: str,
+    pending_key_id: int | None = None,
+) -> None:
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO users (tg_id, username, first_name, last_name, status)
-                VALUES (%s, %s, %s, %s, 'pending')
+                INSERT INTO users (tg_id, username, first_name, last_name, status, pending_key_id)
+                VALUES (%s, %s, %s, %s, 'pending', %s)
                 ON CONFLICT (tg_id)
                 DO UPDATE SET
                     username = EXCLUDED.username,
                     first_name = EXCLUDED.first_name,
-                    last_name = EXCLUDED.last_name
+                    last_name = EXCLUDED.last_name,
+                    pending_key_id = EXCLUDED.pending_key_id
                 """,
-                (tg_id, username, first_name, last_name),
+                (tg_id, username, first_name, last_name, pending_key_id),
             )
         await conn.commit()
 
@@ -105,7 +115,7 @@ async def get_user(tg_id: int) -> dict[str, Any] | None:
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT tg_id, username, first_name, last_name, status, created_at, approved_at FROM users WHERE tg_id = %s",
+                "SELECT tg_id, username, first_name, last_name, status, created_at, approved_at, pending_key_id FROM users WHERE tg_id = %s",
                 (tg_id,),
             )
             return await cur.fetchone()
@@ -156,6 +166,51 @@ async def list_users_with_valid_access() -> list[dict[str, Any]]:
                 "SELECT tg_id FROM user_access WHERE expires_at >= NOW()"
             )
             return list(await cur.fetchall())
+
+
+async def list_approved_without_access() -> list[dict[str, Any]]:
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT u.tg_id
+                FROM users u
+                LEFT JOIN user_access ua ON u.tg_id = ua.tg_id AND ua.expires_at >= NOW()
+                WHERE u.status = 'approved' AND ua.tg_id IS NULL
+                """
+            )
+            return list(await cur.fetchall())
+
+
+async def invalidate_key_by_hash(key_hash: str) -> bool:
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM access_keys WHERE key_hash = %s AND valid_to >= NOW()",
+                (key_hash,),
+            )
+            deleted = cur.rowcount > 0
+        await conn.commit()
+    return deleted
+
+
+async def replace_key(old_hash: str, new_hash: str, created_by: int, days: int = 7) -> bool:
+    now = now_utc()
+    valid_to = now + timedelta(days=days)
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM access_keys WHERE key_hash = %s AND valid_to >= NOW()",
+                (old_hash,),
+            )
+            if cur.rowcount == 0:
+                return False
+            await cur.execute(
+                "INSERT INTO access_keys (key_hash, valid_from, valid_to, created_by) VALUES (%s, %s, %s, %s)",
+                (new_hash, now, valid_to, created_by),
+            )
+        await conn.commit()
+    return True
 
 
 async def create_access_key(key_hash: str, created_by: int, days: int = 7) -> None:

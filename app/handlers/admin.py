@@ -11,15 +11,20 @@ from app.config import ADMIN_IDS
 from app.db import (
     create_access_key,
     get_latest_photo_from_db,
+    get_user,
+    grant_daily_access,
+    invalidate_key_by_hash,
     list_all_users,
     list_approved_users,
+    list_approved_without_access,
     list_pending_users,
     list_users_with_valid_access,
+    replace_key,
     save_photo_to_db,
     set_user_status,
 )
 from app.keyboards import admin_main_kb, approve_user_kb
-from app.states import BanState, BroadcastPhotoState, BroadcastState, CreateKeyState, UnbanState
+from app.states import BanState, BroadcastPhotoState, BroadcastState, CreateKeyState, InvalidateKeyState, ReplaceKeyState, UnbanState
 from app.utils import fmt_dt, hash_key
 
 admin_router = Router()
@@ -65,11 +70,16 @@ async def approve_user(callback: CallbackQuery) -> None:
         return
 
     tg_id = int(callback.data.split(":")[1])
+    user = await get_user(tg_id)
     await set_user_status(tg_id, "approved")
     await callback.message.edit_text(callback.message.text + "\n\n✅ Одобрен")
     await callback.answer("Пользователь подтверждён")
     try:
-        await callback.bot.send_message(tg_id, "✅ Ваша заявка подтверждена.\nВведите ключ:\n/key ВАШ_КЛЮЧ")
+        if user and user.get("pending_key_id"):
+            await grant_daily_access(tg_id, user["pending_key_id"])
+            await callback.bot.send_message(tg_id, "✅ Ваша заявка подтверждена. Доступ открыт!")
+        else:
+            await callback.bot.send_message(tg_id, "✅ Ваша заявка подтверждена.")
     except Exception:
         pass
 
@@ -177,6 +187,15 @@ async def broadcast_photo_handler(message: Message, state: FSMContext) -> None:
         except Exception:
             fail_count += 1
 
+    for user in await list_approved_without_access():
+        try:
+            await message.bot.send_message(
+                user["tg_id"],
+                "🔔 Новое фото от администратора. Введите ключ, чтобы получить доступ к содержимому.",
+            )
+        except Exception:
+            pass
+
     await message.answer(f"Фото + текст разосланы.\nУспешно: {ok_count}\nОшибок: {fail_count}")
     await state.clear()
 
@@ -236,6 +255,15 @@ async def broadcast_handler(message: Message, state: FSMContext) -> None:
         except Exception:
             fail_count += 1
 
+    for user in await list_approved_without_access():
+        try:
+            await message.bot.send_message(
+                user["tg_id"],
+                "🔔 Новое сообщение от администратора. Введите ключ, чтобы получить доступ к содержимому.",
+            )
+        except Exception:
+            pass
+
     await message.answer(f"Готово.\nУспешно: {ok_count}\nОшибок: {fail_count}")
     await state.clear()
 
@@ -262,6 +290,77 @@ async def send_latest_photo_to_all(message: Message) -> None:
             fail_count += 1
 
     await message.answer(f"Фото отправлено.\nУспешно: {ok_count}\nОшибок: {fail_count}")
+
+
+@admin_router.message(F.text == "❌ Обнулить ключ")
+async def ask_invalidate_key(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("Введите ключ для обнуления. Доступ всех пользователей, использовавших этот ключ, будет отозван.")
+    await state.set_state(InvalidateKeyState.waiting_key_value)
+
+
+@admin_router.message(InvalidateKeyState.waiting_key_value)
+async def invalidate_key_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    raw_key = (message.text or "").strip()
+    if len(raw_key) < 4:
+        await message.answer("Ключ слишком короткий.")
+        return
+
+    found = await invalidate_key_by_hash(hash_key(raw_key))
+    if found:
+        await message.answer("✅ Ключ обнулён. Доступ отозван у всех, кто его использовал.")
+    else:
+        await message.answer("❌ Активный ключ не найден.")
+    await state.clear()
+
+
+@admin_router.message(F.text == "🔄 Заменить ключ")
+async def ask_replace_key(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("Введите СТАРЫЙ ключ, который нужно заменить.")
+    await state.set_state(ReplaceKeyState.waiting_old_key)
+
+
+@admin_router.message(ReplaceKeyState.waiting_old_key)
+async def replace_key_old_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    raw_key = (message.text or "").strip()
+    if len(raw_key) < 4:
+        await message.answer("Ключ слишком короткий.")
+        return
+
+    await state.update_data(old_hash=hash_key(raw_key))
+    await message.answer("Введите НОВЫЙ ключ.")
+    await state.set_state(ReplaceKeyState.waiting_new_key)
+
+
+@admin_router.message(ReplaceKeyState.waiting_new_key)
+async def replace_key_new_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    raw_new = (message.text or "").strip()
+    if len(raw_new) < 4:
+        await message.answer("Ключ слишком короткий.")
+        return
+
+    data = await state.get_data()
+    success = await replace_key(data["old_hash"], hash_key(raw_new), message.from_user.id)
+    if success:
+        await message.answer(f"✅ Ключ заменён на 7 дней:\n<code>{raw_new}</code>")
+    else:
+        await message.answer("❌ Старый активный ключ не найден.")
+    await state.clear()
 
 
 @admin_router.message(F.text == "⛔ Забанить")

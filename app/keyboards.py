@@ -18,6 +18,7 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔐 Создать ключ"), KeyboardButton(text="📢 Рассылка")],
             [KeyboardButton(text="🖼 Загрузить фото"), KeyboardButton(text="📷 Последнее фото всем")],
             [KeyboardButton(text="📢 Фото + текст всем")],
+            [KeyboardButton(text="❌ Обнулить ключ"), KeyboardButton(text="🔄 Заменить ключ")],
             [KeyboardButton(text="⛔ Забанить"), KeyboardButton(text="✅ Разбанить")],
         ],
         resize_keyboard=True,
