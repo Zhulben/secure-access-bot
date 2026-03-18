@@ -163,20 +163,31 @@ async def list_users_with_valid_access() -> list[dict[str, Any]]:
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT tg_id FROM user_access WHERE expires_at >= NOW()"
+                """
+                SELECT ua.tg_id
+                FROM user_access ua
+                JOIN users u ON u.tg_id = ua.tg_id
+                WHERE ua.expires_at >= NOW() AND u.status = 'approved'
+                """
             )
             return list(await cur.fetchall())
 
 
-async def list_approved_without_access() -> list[dict[str, Any]]:
+async def list_users_for_notification() -> list[dict[str, Any]]:
+    """All users in DB who are NOT getting full broadcast content (not approved+valid_access)."""
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
                 SELECT u.tg_id
                 FROM users u
-                LEFT JOIN user_access ua ON u.tg_id = ua.tg_id AND ua.expires_at >= NOW()
-                WHERE u.status = 'approved' AND ua.tg_id IS NULL
+                WHERE NOT (
+                    u.status = 'approved'
+                    AND EXISTS (
+                        SELECT 1 FROM user_access ua
+                        WHERE ua.tg_id = u.tg_id AND ua.expires_at >= NOW()
+                    )
+                )
                 """
             )
             return list(await cur.fetchall())
@@ -218,6 +229,7 @@ async def create_access_key(key_hash: str, created_by: int, days: int = 7) -> No
     valid_to = now + timedelta(days=days)
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM access_keys WHERE valid_to >= NOW()")
             await cur.execute(
                 "INSERT INTO access_keys (key_hash, valid_from, valid_to, created_by) VALUES (%s, %s, %s, %s)",
                 (key_hash, now, valid_to, created_by),

@@ -16,7 +16,7 @@ from app.db import (
     invalidate_key_by_hash,
     list_all_users,
     list_approved_users,
-    list_approved_without_access,
+    list_users_for_notification,
     list_pending_users,
     list_users_with_valid_access,
     replace_key,
@@ -187,7 +187,7 @@ async def broadcast_photo_handler(message: Message, state: FSMContext) -> None:
         except Exception:
             fail_count += 1
 
-    for user in await list_approved_without_access():
+    for user in await list_users_for_notification():
         try:
             await message.bot.send_message(
                 user["tg_id"],
@@ -255,7 +255,7 @@ async def broadcast_handler(message: Message, state: FSMContext) -> None:
         except Exception:
             fail_count += 1
 
-    for user in await list_approved_without_access():
+    for user in await list_users_for_notification():
         try:
             await message.bot.send_message(
                 user["tg_id"],
