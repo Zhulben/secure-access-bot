@@ -7,7 +7,7 @@ asyncpg==0.30.0
 alembic==1.14.0
 
 # Configuration
-pydantic==2.10.3
+pydantic==2.9.2
 pydantic-settings==2.6.1
 
 # Utilities
