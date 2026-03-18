@@ -19,6 +19,9 @@ logger = get_logger(__name__)
 # Задержка между сообщениями (мс) для предотвращения flood
 SEND_DELAY_MS = 50
 
+# Хранилище фоновых задач — защита от сборщика мусора
+_background_tasks: set = set()
+
 
 async def create_broadcast(
     session: AsyncSession,
@@ -51,41 +54,47 @@ async def send_broadcast(
     broadcast: Broadcast,
 ) -> dict[str, int]:
     """
-    Разослать сообщение всем целевым пользователям.
+    Разослать уведомления о новом сообщении всем одобренным пользователям.
+    Контент НЕ отправляется — только уведомление с кнопкой для просмотра по коду.
 
     Returns:
         {"success": N, "failed": N, "skipped": N}
     """
+    from bot.keyboards.user import get_view_broadcast_keyboard
+
     stats = {"success": 0, "failed": 0, "skipped": 0}
 
-    # Одобренные пользователи — получают полный контент
+    # Одобренные — уведомление с кнопкой просмотра
     approved_users = await get_approved_users(session)
-
     for user in approved_users:
-        status, error, message_id = await _send_real_message(bot, broadcast, user)
-        await _log_delivery(session, broadcast, user, DeliveryMode.REAL, status, error, message_id)
-        if status == DeliveryStatus.SUCCESS:
+        try:
+            await bot.send_message(
+                chat_id=user.telegram_id,
+                text="📨 Новое сообщение от администратора.\n\nДля просмотра нажмите кнопку и введите код:",
+                reply_markup=get_view_broadcast_keyboard(broadcast.id),
+            )
             stats["success"] += 1
-        else:
+        except Exception as e:
+            logger.warning("Не удалось уведомить tg_id=%s: %s", user.telegram_id, e)
             stats["failed"] += 1
         await asyncio.sleep(SEND_DELAY_MS / 1000)
 
-    # Pending-пользователи — получают маскированное уведомление (если включено)
-    if broadcast.send_to_pending_masked:
-        pending_users = await get_pending_users(session)
-        for user in pending_users:
-            status, error = await _send_masked_message(bot, user)
-            await _log_delivery(session, broadcast, user, DeliveryMode.MASKED, status, error)
-            if status == DeliveryStatus.SUCCESS:
-                stats["success"] += 1
-            else:
-                stats["failed"] += 1
-            await asyncio.sleep(SEND_DELAY_MS / 1000)
+    # Pending — маскированное уведомление без кнопки просмотра
+    pending_users = await get_pending_users(session)
+    for user in pending_users:
+        try:
+            await bot.send_message(
+                chat_id=user.telegram_id,
+                text="У вас есть новое сообщение от администратора.\n\n"
+                     "Завершите регистрацию, чтобы получить доступ к материалам.",
+            )
+            stats["success"] += 1
+        except Exception as e:
+            logger.warning("Не удалось уведомить pending tg_id=%s: %s", user.telegram_id, e)
+            stats["failed"] += 1
+        await asyncio.sleep(SEND_DELAY_MS / 1000)
 
-    logger.info(
-        "Рассылка id=%s завершена: %s",
-        broadcast.id, stats,
-    )
+    logger.info("Уведомления о рассылке id=%s отправлены: %s", broadcast.id, stats)
     return stats
 
 
@@ -175,6 +184,92 @@ async def _log_delivery(
     )
     session.add(log)
     # Не делаем flush здесь — накапливаем и flush в конце рассылки
+
+
+async def send_broadcast_content_to_user(
+    bot: Bot,
+    broadcast: Broadcast,
+    chat_id: int,
+    view_duration: int = 300,
+    notification_message_id: Optional[int] = None,
+) -> None:
+    """
+    Отправить содержимое рассылки конкретному пользователю.
+    Через view_duration секунд:
+    - если передан notification_message_id: редактирует его обратно к исходному виду с кнопкой
+    - иначе: удаляет сообщение с контентом и отправляет заглушку
+    """
+    from bot.keyboards.user import get_view_broadcast_keyboard
+
+    msg = None
+    try:
+        if broadcast.broadcast_type == BroadcastType.TEXT:
+            msg = await bot.send_message(chat_id=chat_id, text=broadcast.text or "")
+        elif broadcast.broadcast_type == BroadcastType.PHOTO:
+            msg = await bot.send_photo(chat_id=chat_id, photo=broadcast.photo_file_id or "")
+        elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
+            msg = await bot.send_photo(
+                chat_id=chat_id,
+                photo=broadcast.photo_file_id or "",
+                caption=broadcast.text or "",
+            )
+    except Exception as e:
+        logger.warning("Не удалось отправить контент рассылки tg_id=%s: %s", chat_id, e)
+        return
+
+    if msg:
+        task = asyncio.create_task(
+            _expire_view(
+                bot=bot,
+                chat_id=chat_id,
+                content_message_id=msg.message_id,
+                delay=view_duration,
+                notification_message_id=notification_message_id,
+                broadcast_id=broadcast.id,
+            )
+        )
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+
+async def _expire_view(
+    bot: Bot,
+    chat_id: int,
+    content_message_id: int,
+    delay: int,
+    notification_message_id: Optional[int],
+    broadcast_id: int,
+) -> None:
+    """Через delay секунд скрыть контент и вернуть сообщение в исходный вид."""
+    from bot.keyboards.user import get_view_broadcast_keyboard
+
+    await asyncio.sleep(delay)
+
+    # Удалить сообщение с контентом
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=content_message_id)
+    except Exception:
+        pass
+
+    # Восстановить исходное уведомление или отправить заглушку
+    if notification_message_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=notification_message_id,
+                text="📨 Новое сообщение от администратора.\n\nДля просмотра нажмите кнопку и введите код:",
+                reply_markup=get_view_broadcast_keyboard(broadcast_id),
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="🔒 Время просмотра истекло. Используйте кнопки меню для повторного запроса.",
+            )
+        except Exception:
+            pass
 
 
 async def get_highlighted_broadcasts(session: AsyncSession) -> list:

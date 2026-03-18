@@ -2,8 +2,24 @@
 Клавиатуры для обычных пользователей.
 Пользовательский интерфейс минимален: бот ведёт диалог сообщениями.
 """
+from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
+
+class ViewBroadcastCallback(CallbackData, prefix="viewbc"):
+    """Просмотр конкретной рассылки по коду."""
+    broadcast_id: int
+
+
+def get_view_broadcast_keyboard(broadcast_id: int) -> InlineKeyboardMarkup:
+    """Кнопка-приглашение ввести код для просмотра рассылки."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🔐 Просмотреть",
+        callback_data=ViewBroadcastCallback(broadcast_id=broadcast_id),
+    )
+    return builder.as_markup()
 
 
 def remove_keyboard() -> ReplyKeyboardRemove:
@@ -36,4 +52,4 @@ def get_user_main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     if is_admin:
         builder.button(text="⚙️ Панель администратора")
     builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
+    return builder.as_markup(resize_keyboard=True, is_persistent=True)

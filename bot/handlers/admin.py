@@ -48,7 +48,8 @@ from bot.services.approval_service import (
     get_all_pending_requests,
     get_pending_request_for_user,
 )
-from bot.services.broadcast_service import clear_user_chats, create_broadcast, delete_broadcast_messages, deliver_missed_broadcasts, get_last_broadcasts, send_broadcast, toggle_highlight_broadcast
+from bot.services.broadcast_service import clear_user_chats, create_broadcast, delete_broadcast_messages, deliver_missed_broadcasts, get_last_broadcasts, send_broadcast, send_broadcast_content_to_user, toggle_highlight_broadcast
+from bot.services.viewer_code_service import get_or_create_viewer_code, regenerate_viewer_code, get_viewer_code
 from bot.services.key_service import (
     activate_key,
     create_key,
@@ -69,7 +70,7 @@ from bot.services.user_service import (
     get_pending_users,
     search_users,
 )
-from bot.states.admin import AdminManageStates, UserSearchStates
+from bot.states.admin import AdminManageStates, UserSearchStates, ViewerCodeStates
 from bot.states.broadcast import BroadcastStates
 from bot.states.key_management import KeyCreateStates
 from bot.utils.logger import get_logger
@@ -227,8 +228,14 @@ async def approve_user_callback(
         "Ваша заявка одобрена! Добро пожаловать!\n\nВведите /start для начала работы.",
     )
 
-    # Отправить все пропущенные рассылки
-    await deliver_missed_broadcasts(bot, session, user)
+    # Сообщить об имеющихся сообщениях
+    from bot.services.broadcast_service import get_last_broadcasts
+    last = await get_last_broadcasts(session, limit=1)
+    if last:
+        await bot.send_message(
+            user.telegram_id,
+            "📨 У вас есть сообщения от администратора. Используйте кнопки меню для просмотра.",
+        )
 
 
 @router.callback_query(UserActionCallback.filter(F.action == "reject"))
@@ -1099,22 +1106,26 @@ async def execute_broadcast(
         broadcast_type=BroadcastType(data.get("broadcast_type", BroadcastType.TEXT.value)),
         text=data.get("text"),
         photo_file_id=data.get("photo_file_id"),
-        send_to_pending_masked=data.get("send_to_pending_masked", False),
+        send_to_pending_masked=False,
     )
-    # commit промежуточный чтобы broadcast.id был доступен при логировании
     await session.commit()
 
+    # Получить/создать код просмотра
+    viewer_code = await get_or_create_viewer_code(session)
+    await session.commit()
+
+    # Отправить уведомления (без контента)
     stats = await send_broadcast(bot, session, broadcast)
 
     await call.message.answer(
-        f"Рассылка завершена!\n\n"
+        f"Рассылка создана! Уведомления отправлены.\n\n"
         f"Успешно: {stats['success']}\n"
-        f"Ошибок: {stats['failed']}\n"
-        f"Пропущено: {stats['skipped']}",
+        f"Ошибок: {stats['failed']}\n\n"
+        f"🔑 Код просмотра для пользователей:\n<code>{viewer_code}</code>",
         reply_markup=get_admin_main_menu(),
     )
 
-    # Отправить превью рассылки с кнопкой выделения
+    # Превью с кнопкой выделения
     try:
         if broadcast.broadcast_type == BroadcastType.TEXT:
             await bot.send_message(
@@ -1429,6 +1440,109 @@ async def admin_info_callback(call: CallbackQuery) -> None:
 # ---------------------------------------------------------------------------
 # Удаление рассылок из чатов пользователей
 # ---------------------------------------------------------------------------
+
+
+@router.message(F.text == "🔑 Код просмотра")
+async def show_viewer_code(
+    message: Message,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Показать текущий код просмотра и кнопки управления."""
+    if admin_user is None:
+        return
+    code = await get_viewer_code(session)
+    if code:
+        text = f"🔑 Текущий код просмотра:\n\n<code>{code}</code>\n\nПередайте этот код пользователям."
+    else:
+        text = "Код просмотра ещё не создан."
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Сгенерировать случайный", callback_data="viewer_code_regenerate")
+    builder.button(text="✏️ Ввести свой код", callback_data="viewer_code_custom")
+    builder.adjust(1)
+    await message.answer(text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data == "viewer_code_regenerate")
+async def regenerate_viewer_code_callback(
+    call: CallbackQuery,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Сгенерировать случайный код просмотра."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    new_code = await regenerate_viewer_code(session)
+    await session.commit()
+    await call.message.edit_text(
+        f"✅ Новый код просмотра:\n\n<code>{new_code}</code>\n\n"
+        f"⚠️ Старый код больше не действует."
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "viewer_code_custom")
+async def viewer_code_custom_prompt(
+    call: CallbackQuery,
+    state: FSMContext,
+    admin_user: Optional[User],
+) -> None:
+    """Предложить ввести свой код."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    await state.set_state(ViewerCodeStates.waiting_custom_code)
+    await call.message.answer(
+        "Введите свой код просмотра (до 16 символов):",
+        reply_markup=get_cancel_keyboard(),
+    )
+    await call.answer()
+
+
+@router.message(ViewerCodeStates.waiting_custom_code, F.text == "Отмена")
+async def viewer_code_custom_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=get_admin_main_menu())
+
+
+@router.message(ViewerCodeStates.waiting_custom_code)
+async def viewer_code_custom_set(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Сохранить кастомный код просмотра."""
+    if admin_user is None:
+        await state.clear()
+        return
+    code = (message.text or "").strip()
+    if not code:
+        await message.answer("Код не может быть пустым. Введите ещё раз:")
+        return
+    if len(code) > 16:
+        await message.answer("Код слишком длинный (максимум 16 символов). Введите ещё раз:")
+        return
+    from bot.services.viewer_code_service import regenerate_viewer_code as _regen
+    from sqlalchemy import select as _select
+    from bot.database.models import ViewerCode as _VC
+    result = await session.execute(_select(_VC).limit(1))
+    vc = result.scalar_one_or_none()
+    if vc is None:
+        vc = _VC(code=code)
+        session.add(vc)
+    else:
+        vc.code = code
+    await session.flush()
+    await session.commit()
+    await state.clear()
+    await message.answer(
+        f"✅ Код просмотра установлен:\n\n<code>{code}</code>\n\n"
+        f"⚠️ Старый код больше не действует.",
+        reply_markup=get_admin_main_menu(),
+    )
 
 
 @router.message(F.text == "🗑 Удалить рассылки")

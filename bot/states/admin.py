@@ -15,3 +15,8 @@ class UserSearchStates(StatesGroup):
 class AdminManageStates(StatesGroup):
     """Добавление нового администратора."""
     waiting_telegram_id = State()   # Ввод Telegram ID нового администратора
+
+
+class ViewerCodeStates(StatesGroup):
+    """Установка кастомного кода просмотра."""
+    waiting_custom_code = State()

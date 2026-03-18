@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.enums import UserStatus
 from bot.keyboards.user import (
+    ViewBroadcastCallback,
     get_cancel_keyboard,
     get_registration_start_keyboard,
     get_user_main_menu,
@@ -18,7 +19,7 @@ from bot.keyboards.user import (
 )
 from bot.services.approval_service import create_approval_request, get_pending_request_for_user
 from bot.services.auth_service import is_user_banned
-from bot.services.broadcast_service import get_highlighted_broadcasts, get_last_broadcasts
+from bot.services.broadcast_service import get_highlighted_broadcasts, get_last_broadcasts, send_broadcast_content_to_user
 from bot.services.key_service import validate_key_for_user
 from bot.services.user_service import (
     get_or_create_user,
@@ -26,7 +27,9 @@ from bot.services.user_service import (
     set_registration_data,
     update_last_seen,
 )
+from bot.services.viewer_code_service import validate_viewer_code
 from bot.states.registration import RegistrationStates
+from bot.states.viewer import ViewerStates
 from bot.utils.logger import get_logger
 from bot.utils.security import get_admin_ids
 
@@ -276,61 +279,115 @@ async def process_key(
 @router.message(F.text == "📌 Актуальное")
 async def show_highlighted(
     message: Message,
+    state: FSMContext,
     session: AsyncSession,
-    bot: Bot,
 ) -> None:
-    """Показать все актуальные (выделенные) сообщения администратора."""
+    """Запросить код для просмотра актуальных сообщений."""
     broadcasts = await get_highlighted_broadcasts(session)
     if not broadcasts:
         await message.answer("Актуальных сообщений пока нет.")
         return
-
-    await message.answer(f"Актуальные сообщения ({len(broadcasts)}):")
-    from bot.database.enums import BroadcastType
-    for broadcast in broadcasts:
-        try:
-            if broadcast.broadcast_type == BroadcastType.TEXT:
-                await bot.send_message(chat_id=message.from_user.id, text=broadcast.text or "")
-            elif broadcast.broadcast_type == BroadcastType.PHOTO:
-                await bot.send_photo(chat_id=message.from_user.id, photo=broadcast.photo_file_id or "")
-            elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
-                await bot.send_photo(
-                    chat_id=message.from_user.id,
-                    photo=broadcast.photo_file_id or "",
-                    caption=broadcast.text or "",
-                )
-        except Exception:
-            pass
+    await state.set_state(ViewerStates.waiting_code)
+    await state.update_data(view_type="highlighted")
+    await message.answer(
+        f"📌 Актуальных сообщений: {len(broadcasts)}\n\n"
+        "Введите код для просмотра (доступны 5 минут):",
+        reply_markup=get_cancel_keyboard(),
+    )
 
 
 @router.message(F.text == "📨 Последние сообщения")
 async def show_last_messages(
     message: Message,
+    state: FSMContext,
     session: AsyncSession,
-    bot: Bot,
 ) -> None:
-    """Отправить пользователю последние 5 рассылок администратора."""
+    """Запросить код для просмотра последних сообщений."""
     broadcasts = await get_last_broadcasts(session, limit=5)
     if not broadcasts:
         await message.answer("Сообщений от администратора пока нет.")
         return
+    await state.set_state(ViewerStates.waiting_code)
+    await state.update_data(view_type="last")
+    await message.answer(
+        f"📨 Последних сообщений: {len(broadcasts)}\n\n"
+        "Введите код для просмотра (доступны 5 минут):",
+        reply_markup=get_cancel_keyboard(),
+    )
 
-    await message.answer(f"Последние сообщения администратора ({len(broadcasts)}):")
-    for broadcast in broadcasts:
-        from bot.database.enums import BroadcastType
-        try:
-            if broadcast.broadcast_type == BroadcastType.TEXT:
-                await bot.send_message(chat_id=message.from_user.id, text=broadcast.text or "")
-            elif broadcast.broadcast_type == BroadcastType.PHOTO:
-                await bot.send_photo(chat_id=message.from_user.id, photo=broadcast.photo_file_id or "")
-            elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
-                await bot.send_photo(
-                    chat_id=message.from_user.id,
-                    photo=broadcast.photo_file_id or "",
-                    caption=broadcast.text or "",
-                )
-        except Exception:
-            pass
+
+@router.callback_query(ViewBroadcastCallback.filter())
+async def view_broadcast_by_button(
+    call: CallbackQuery,
+    callback_data: ViewBroadcastCallback,
+    state: FSMContext,
+) -> None:
+    """Нажатие кнопки 'Просмотреть' на уведомлении о рассылке."""
+    await state.set_state(ViewerStates.waiting_code)
+    await state.update_data(
+        view_type="broadcast",
+        broadcast_id=callback_data.broadcast_id,
+        notification_message_id=call.message.message_id,
+    )
+    await call.message.answer(
+        "Введите код для просмотра сообщения (доступно 5 минут):",
+        reply_markup=get_cancel_keyboard(),
+    )
+    await call.answer()
+
+
+@router.message(ViewerStates.waiting_code)
+async def process_viewer_code(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+) -> None:
+    """Обработать введённый код просмотра."""
+    if message.text == "Отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=remove_keyboard())
+        return
+
+    valid = await validate_viewer_code(session, message.text or "")
+    if not valid:
+        await message.answer(
+            "Неверный код. Попробуйте ещё раз:",
+            reply_markup=get_cancel_keyboard(),
+        )
+        return
+
+    data = await state.get_data()
+    await state.clear()
+    view_type = data.get("view_type")
+
+    await message.answer(
+        "✅ Код принят. Сообщения будут удалены через 5 минут.",
+        reply_markup=remove_keyboard(),
+    )
+
+    if view_type == "broadcast":
+        from bot.database.models import Broadcast
+        from sqlalchemy import select
+        result = await session.execute(
+            select(Broadcast).where(Broadcast.id == data.get("broadcast_id"))
+        )
+        broadcast = result.scalar_one_or_none()
+        if broadcast:
+            await send_broadcast_content_to_user(
+                bot, broadcast, message.from_user.id,
+                notification_message_id=data.get("notification_message_id"),
+            )
+
+    elif view_type == "highlighted":
+        broadcasts = await get_highlighted_broadcasts(session)
+        for bc in broadcasts:
+            await send_broadcast_content_to_user(bot, bc, message.from_user.id)
+
+    elif view_type == "last":
+        broadcasts = await get_last_broadcasts(session, limit=5)
+        for bc in broadcasts:
+            await send_broadcast_content_to_user(bot, bc, message.from_user.id)
 
 
 async def _notify_admins_about_request(

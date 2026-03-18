@@ -304,3 +304,20 @@ class DeliveryLog(Base):
             f"<DeliveryLog broadcast={self.broadcast_id} "
             f"user={self.user_id} status={self.delivery_status}>"
         )
+
+
+class ViewerCode(Base):
+    """Глобальный код просмотра рассылок."""
+
+    __tablename__ = "viewer_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    # updated_at не нужен
+    updated_at: Mapped[Optional[datetime]] = mapped_column(  # type: ignore[assignment]
+        DateTime(timezone=True), nullable=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewerCode code={self.code}>"

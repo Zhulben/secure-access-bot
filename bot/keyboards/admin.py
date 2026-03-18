@@ -59,11 +59,12 @@ def get_admin_main_menu() -> ReplyKeyboardMarkup:
     builder.button(text="📊 Статистика")
     builder.button(text="🛡 Администраторы")
     builder.button(text="📌 Актуальные")
+    builder.button(text="🔑 Код просмотра")
     builder.button(text="🗑 Удалить рассылки")
     builder.button(text="💬 Очистить чаты")
     builder.button(text="🧹 Очистить пользователей")
-    builder.adjust(2, 2, 2, 2, 1)
-    return builder.as_markup(resize_keyboard=True)
+    builder.adjust(2, 2, 2, 2, 2, 1)
+    return builder.as_markup(resize_keyboard=True, is_persistent=True)
 
 
 def get_admins_list_keyboard(
