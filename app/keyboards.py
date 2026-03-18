@@ -20,8 +20,20 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📢 Фото + текст всем")],
             [KeyboardButton(text="❌ Обнулить ключ"), KeyboardButton(text="🔄 Заменить ключ")],
             [KeyboardButton(text="⛔ Забанить"), KeyboardButton(text="✅ Разбанить")],
+            [KeyboardButton(text="🗑 Очистить базу")],
         ],
         resize_keyboard=True,
+    )
+
+
+def confirm_clear_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, очистить всё", callback_data="clear_db:confirm"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="clear_db:cancel"),
+            ]
+        ]
     )
 
 

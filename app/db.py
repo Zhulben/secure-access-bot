@@ -305,6 +305,13 @@ async def save_photo_to_db(filename: str, mime_type: str, photo_data: bytes, upl
         await conn.commit()
 
 
+async def clear_all_data() -> None:
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("TRUNCATE TABLE user_access, access_keys, photos, users RESTART IDENTITY CASCADE")
+        await conn.commit()
+
+
 async def get_latest_photo_from_db() -> dict[str, Any] | None:
     async with pool.connection() as conn:
         async with conn.cursor() as cur:

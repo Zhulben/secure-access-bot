@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 
 from app.config import ADMIN_IDS
 from app.db import (
+    clear_all_data,
     create_access_key,
     get_latest_photo_from_db,
     get_user,
@@ -23,7 +24,7 @@ from app.db import (
     save_photo_to_db,
     set_user_status,
 )
-from app.keyboards import admin_main_kb, approve_user_kb
+from app.keyboards import admin_main_kb, approve_user_kb, confirm_clear_kb
 from app.states import BanState, BroadcastPhotoState, BroadcastState, CreateKeyState, InvalidateKeyState, ReplaceKeyState, UnbanState
 from app.utils import fmt_dt, hash_key
 
@@ -405,3 +406,32 @@ async def unban_handler(message: Message, state: FSMContext) -> None:
     await set_user_status(tg_id, "approved")
     await message.answer(f"✅ Пользователь {tg_id} разбанен.")
     await state.clear()
+
+
+@admin_router.message(F.text == "🗑 Очистить базу")
+async def ask_clear_db(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "⚠️ Вы уверены? Это удалит ВСЕХ пользователей, ключи, доступы и фотографии. Действие необратимо.",
+        reply_markup=confirm_clear_kb(),
+    )
+
+
+@admin_router.callback_query(F.data == "clear_db:confirm")
+async def confirm_clear_db(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await clear_all_data()
+    await callback.message.edit_text("🗑 База данных полностью очищена.")
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "clear_db:cancel")
+async def cancel_clear_db(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.edit_text("❌ Очистка отменена.")
+    await callback.answer()
