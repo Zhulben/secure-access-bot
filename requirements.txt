@@ -1,0 +1,4 @@
+aiogram==3.26.0
+python-dotenv==1.0.1
+psycopg[binary,pool]==3.2.9
+redis==5.0.7
