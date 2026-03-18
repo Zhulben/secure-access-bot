@@ -1,45 +1,64 @@
+version: "3.9"
+
 services:
-  bot:
+  # --------------------------------------------------------
+  # PostgreSQL база данных
+  # --------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: secure_access_bot_db
+    restart: always
+    environment:
+      POSTGRES_DB: secure_access_bot
+      POSTGRES_USER: botuser
+      POSTGRES_PASSWORD: botpassword
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"   # Опционально: закройте порт для production
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U botuser -d secure_access_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # --------------------------------------------------------
+  # Миграции Alembic (запускаются один раз при старте)
+  # --------------------------------------------------------
+  migrate:
     build: .
-    container_name: secure_access_bot
-    restart: unless-stopped
-    env_file:
-      - .env
+    container_name: secure_access_bot_migrate
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://botuser:botpassword@postgres:5432/secure_access_bot
+    command: ["alembic", "upgrade", "head"]
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_started
-    volumes:
-      - ./:/app
+    restart: on-failure
 
-  postgres:
-    image: postgres:16-alpine
-    container_name: secure_access_postgres
-    restart: unless-stopped
+  # --------------------------------------------------------
+  # Telegram бот
+  # --------------------------------------------------------
+  bot:
+    build: .
+    container_name: secure_access_bot_app
+    restart: always
+    env_file: .env
     environment:
-      POSTGRES_DB: secure_bot
-      POSTGRES_USER: botuser
-      POSTGRES_PASSWORD: botpassword
-    ports:
-      - "5432:5432"
+      DATABASE_URL: postgresql+asyncpg://botuser:botpassword@postgres:5432/secure_access_bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U botuser -d secure_bot"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - ./logs:/app/logs   # Опционально: для файловых логов
 
-  redis:
-    image: redis:7-alpine
-    container_name: secure_access_redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
+# --------------------------------------------------------
+# Persistent volume для данных PostgreSQL
+# --------------------------------------------------------
 volumes:
   postgres_data:
-  redis_data:
+    driver: local

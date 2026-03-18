@@ -1,0 +1,61 @@
+"""Пакет keyboards: клавиатуры пользователя и администратора."""
+from bot.keyboards.admin import (
+    BroadcastActionCallback,
+    KeyActionCallback,
+    KeyTypeCallback,
+    PaginationCallback,
+    PendingBroadcastCallback,
+    UserActionCallback,
+    get_admin_main_menu,
+    get_approval_keyboard,
+    get_broadcast_confirm_keyboard,
+    get_broadcast_type_keyboard,
+    get_confirm_keyboard,
+    get_custom_or_auto_key_keyboard,
+    get_key_actions_keyboard,
+    get_key_confirm_delete_keyboard,
+    get_key_list_keyboard,
+    get_key_type_keyboard,
+    get_pending_broadcast_keyboard,
+    get_pending_requests_keyboard,
+    get_skip_keyboard,
+    get_user_actions_keyboard,
+    get_users_list_keyboard,
+)
+from bot.keyboards.user import (
+    get_cancel_keyboard,
+    get_registration_start_keyboard,
+    get_user_main_menu,
+    remove_keyboard,
+)
+
+__all__ = [
+    # User keyboards
+    "remove_keyboard",
+    "get_cancel_keyboard",
+    "get_registration_start_keyboard",
+    "get_user_main_menu",
+    # Admin keyboards
+    "get_admin_main_menu",
+    "get_pending_requests_keyboard",
+    "get_approval_keyboard",
+    "get_user_actions_keyboard",
+    "get_users_list_keyboard",
+    "get_key_type_keyboard",
+    "get_key_list_keyboard",
+    "get_key_actions_keyboard",
+    "get_key_confirm_delete_keyboard",
+    "get_broadcast_type_keyboard",
+    "get_pending_broadcast_keyboard",
+    "get_broadcast_confirm_keyboard",
+    "get_confirm_keyboard",
+    "get_skip_keyboard",
+    "get_custom_or_auto_key_keyboard",
+    # Callbacks
+    "UserActionCallback",
+    "KeyActionCallback",
+    "BroadcastActionCallback",
+    "PaginationCallback",
+    "KeyTypeCallback",
+    "PendingBroadcastCallback",
+]
