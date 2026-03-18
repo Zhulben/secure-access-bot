@@ -350,6 +350,13 @@ async def process_viewer_code(
         return
 
     valid = await validate_viewer_code(session, message.text or "")
+
+    # Удалить сообщение с кодом из чата
+    try:
+        await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+    except Exception:
+        pass
+
     if not valid:
         await message.answer(
             "Неверный код. Попробуйте ещё раз:",
