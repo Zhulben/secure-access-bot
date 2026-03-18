@@ -179,6 +179,63 @@ async def _log_delivery(
     # Не делаем flush здесь — накапливаем и flush в конце рассылки
 
 
+async def get_last_broadcasts(session: AsyncSession, limit: int = 5) -> list:
+    """Получить последние N рассылок администратора."""
+    from sqlalchemy import select
+    from bot.database.models import Broadcast
+    result = await session.execute(
+        select(Broadcast).order_by(Broadcast.created_at.desc()).limit(limit)
+    )
+    broadcasts = list(result.scalars().all())
+    broadcasts.reverse()  # от старых к новым
+    return broadcasts
+
+
+async def deliver_missed_broadcasts(
+    bot: Bot,
+    session: AsyncSession,
+    user: User,
+) -> int:
+    """
+    Отправить пользователю все рассылки, которые он пропустил (не получил как REAL).
+    Вызывается при одобрении пользователя.
+    Возвращает количество отправленных рассылок.
+    """
+    from sqlalchemy import select, exists
+    from bot.database.models import Broadcast, DeliveryLog
+
+    # Найти рассылки без REAL-доставки для этого пользователя
+    already_delivered = (
+        select(DeliveryLog.broadcast_id)
+        .where(
+            DeliveryLog.user_id == user.id,
+            DeliveryLog.delivery_mode == DeliveryMode.REAL,
+        )
+    )
+    result = await session.execute(
+        select(Broadcast)
+        .where(Broadcast.id.not_in(already_delivered))
+        .order_by(Broadcast.created_at.asc())
+    )
+    missed = list(result.scalars().all())
+
+    sent = 0
+    for broadcast in missed:
+        status, error = await _send_real_message(bot, broadcast, user)
+        await _log_delivery(session, broadcast, user, DeliveryMode.REAL, status, error)
+        if status == DeliveryStatus.SUCCESS:
+            sent += 1
+        await asyncio.sleep(SEND_DELAY_MS / 1000)
+
+    await session.flush()
+    if sent:
+        logger.info(
+            "Пользователю tg_id=%s доставлено пропущенных рассылок: %d",
+            user.telegram_id, sent,
+        )
+    return sent
+
+
 async def get_broadcast_stats(session: AsyncSession, broadcast_id: int) -> dict[str, int]:
     """Получить статистику доставки конкретной рассылки."""
     from sqlalchemy import select, func

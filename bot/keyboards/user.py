@@ -18,6 +18,7 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 
+
 def get_registration_start_keyboard() -> InlineKeyboardMarkup:
     """Кнопка начала регистрации."""
     builder = InlineKeyboardBuilder()
@@ -25,10 +26,13 @@ def get_registration_start_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_user_main_menu() -> ReplyKeyboardMarkup:
+def get_user_main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Главное меню одобренного пользователя."""
     builder = ReplyKeyboardBuilder()
     builder.button(text="Мой профиль")
+    builder.button(text="Последние сообщения")
     builder.button(text="Помощь")
+    if is_admin:
+        builder.button(text="Панель администратора")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)

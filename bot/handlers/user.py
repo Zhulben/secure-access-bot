@@ -16,11 +16,13 @@ from bot.keyboards.user import (
     get_user_main_menu,
     remove_keyboard,
 )
-from bot.services.approval_service import create_approval_request
+from bot.services.approval_service import create_approval_request, get_pending_request_for_user
 from bot.services.auth_service import is_user_banned
+from bot.services.broadcast_service import get_last_broadcasts
 from bot.services.key_service import validate_key_for_user
 from bot.services.user_service import (
     get_or_create_user,
+    get_user_by_telegram_id,
     set_registration_data,
     update_last_seen,
 )
@@ -69,6 +71,12 @@ async def cmd_start(
     # Сбросить FSM, если пользователь повторно нажал /start во время регистрации
     await state.clear()
 
+    # Рекламное сообщение с VPN-ссылкой
+    await message.answer(
+        'Если у вас не работает или плохо работает телеграмм, советую вот этот VPN\n'
+        '<a href="https://t.me/FixPriceVPN_bot?start=partner_2046293957">https://t.me/FixPriceVPN_bot?start=partner_2046293957</a>'
+    )
+
     # --- Маршрутизация по статусу ---
 
     if is_user_banned(user):
@@ -80,19 +88,26 @@ async def cmd_start(
         return
 
     if user.status == UserStatus.APPROVED:
+        is_admin = tg_user.id in get_admin_ids()
         await message.answer(
             f"С возвращением, {user.entered_first_name or tg_user.first_name}!\n"
             "Вы авторизованы и имеете доступ.",
-            reply_markup=get_user_main_menu(),
+            reply_markup=get_user_main_menu(is_admin=is_admin),
         )
         return
 
     if user.status == UserStatus.PENDING:
-        await message.answer(
-            "Ваша заявка уже находится на рассмотрении.\n"
-            "Пожалуйста, дождитесь решения администратора.",
-            reply_markup=remove_keyboard(),
-        )
+        # Показать "заявка на рассмотрении" только если заявка реально существует
+        pending_request = await get_pending_request_for_user(session, user.id)
+        if pending_request:
+            await message.answer(
+                "Ваша заявка уже находится на рассмотрении.\n"
+                "Пожалуйста, дождитесь решения администратора.",
+                reply_markup=remove_keyboard(),
+            )
+            return
+        # Заявки нет — пользователь ещё не прошёл регистрацию
+        await _start_registration(message, state)
         return
 
     if user.status == UserStatus.REJECTED:
@@ -226,8 +241,6 @@ async def process_key(
     bot: Bot,
 ) -> None:
     """Обработать ввод ключа. При успехе — создать заявку и уведомить админов."""
-    from bot.services.user_service import get_user_by_telegram_id
-
     user = await get_user_by_telegram_id(session, message.from_user.id)
     if user is None:
         await message.answer("Ошибка: пользователь не найден. Введите /start.")
@@ -244,19 +257,50 @@ async def process_key(
         )
         return
 
-    # Создать заявку (антидублирование внутри create_approval_request)
     request, created = await create_approval_request(session, user, key)
-
     await state.clear()
     await message.answer(
         "Заявка отправлена администратору.\n\n"
         "Вы получите уведомление после рассмотрения вашей заявки.",
         reply_markup=remove_keyboard(),
     )
-
     if created:
-        # Уведомить всех администраторов
         await _notify_admins_about_request(bot, session, user, request)
+
+
+# ---------------------------------------------------------------------------
+# Последние сообщения администратора
+# ---------------------------------------------------------------------------
+
+
+@router.message(F.text == "Последние сообщения")
+async def show_last_messages(
+    message: Message,
+    session: AsyncSession,
+    bot: Bot,
+) -> None:
+    """Отправить пользователю последние 5 рассылок администратора."""
+    broadcasts = await get_last_broadcasts(session, limit=5)
+    if not broadcasts:
+        await message.answer("Сообщений от администратора пока нет.")
+        return
+
+    await message.answer(f"Последние сообщения администратора ({len(broadcasts)}):")
+    for broadcast in broadcasts:
+        from bot.database.enums import BroadcastType
+        try:
+            if broadcast.broadcast_type == BroadcastType.TEXT:
+                await bot.send_message(chat_id=message.from_user.id, text=broadcast.text or "")
+            elif broadcast.broadcast_type == BroadcastType.PHOTO:
+                await bot.send_photo(chat_id=message.from_user.id, photo=broadcast.photo_file_id or "")
+            elif broadcast.broadcast_type == BroadcastType.PHOTO_CAPTION:
+                await bot.send_photo(
+                    chat_id=message.from_user.id,
+                    photo=broadcast.photo_file_id or "",
+                    caption=broadcast.text or "",
+                )
+        except Exception:
+            pass
 
 
 async def _notify_admins_about_request(

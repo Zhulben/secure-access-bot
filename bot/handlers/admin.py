@@ -24,6 +24,7 @@ from bot.keyboards.admin import (
     get_approval_keyboard,
     get_broadcast_confirm_keyboard,
     get_broadcast_type_keyboard,
+    get_clear_users_confirm_keyboard,
     get_custom_or_auto_key_keyboard,
     get_key_actions_keyboard,
     get_key_confirm_delete_keyboard,
@@ -41,7 +42,7 @@ from bot.services.approval_service import (
     get_all_pending_requests,
     get_pending_request_for_user,
 )
-from bot.services.broadcast_service import create_broadcast, send_broadcast
+from bot.services.broadcast_service import create_broadcast, deliver_missed_broadcasts, send_broadcast
 from bot.services.key_service import (
     activate_key,
     create_key,
@@ -52,6 +53,7 @@ from bot.services.key_service import (
 )
 from bot.services.user_service import (
     PAGE_SIZE,
+    clear_all_users,
     get_all_users,
     get_user_by_id,
     get_users_by_status,
@@ -74,6 +76,7 @@ router = Router(name="admin")
 
 
 @router.message(Command("admin"))
+@router.message(F.text == "Панель администратора")
 async def cmd_admin(message: Message, admin_user: Optional[User]) -> None:
     """Открыть главное меню администратора."""
     if admin_user is None:
@@ -204,6 +207,9 @@ async def approve_user_callback(
         user.telegram_id,
         "Ваша заявка одобрена! Добро пожаловать!\n\nВведите /start для начала работы.",
     )
+
+    # Отправить все пропущенные рассылки
+    await deliver_missed_broadcasts(bot, session, user)
 
 
 @router.callback_query(UserActionCallback.filter(F.action == "reject"))
@@ -1183,6 +1189,51 @@ async def process_user_search(
         f"Найдено пользователей: {len(items)}",
         reply_markup=get_users_list_keyboard(items, page=0, has_next=False),
     )
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Очистка всех пользователей
+# ---------------------------------------------------------------------------
+
+
+@router.message(F.text == "Очистить пользователей")
+async def clear_users_prompt(
+    message: Message,
+    admin_user: Optional[User],
+) -> None:
+    """Запросить подтверждение перед удалением всех пользователей."""
+    if admin_user is None:
+        return
+    await message.answer(
+        "Будут удалены ВСЕ пользователи, кроме вас.\n"
+        "Это действие необратимо. Продолжить?",
+        reply_markup=get_clear_users_confirm_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "clear_users_confirm")
+async def clear_users_confirmed(
+    call: CallbackQuery,
+    session: AsyncSession,
+    admin_user: Optional[User],
+) -> None:
+    """Выполнить удаление всех пользователей кроме текущего админа."""
+    if admin_user is None:
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    count = await clear_all_users(session, admin_user.telegram_id)
+    await call.message.edit_text(
+        f"Готово. Удалено пользователей: {count}.",
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "clear_users_cancel")
+async def clear_users_cancelled(call: CallbackQuery) -> None:
+    """Отменить очистку."""
+    await call.message.edit_text("Отменено.")
+    await call.answer()
 
 
 # ---------------------------------------------------------------------------

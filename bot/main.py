@@ -58,6 +58,10 @@ async def main() -> None:
     logger.info("Роутеры зарегистрированы.")
     logger.info("Бот запущен. Ожидание сообщений...")
 
+    # Сбросить зависшую сессию getUpdates / webhook на стороне Telegram
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Сессия Telegram сброшена.")
+
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

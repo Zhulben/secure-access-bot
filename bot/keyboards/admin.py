@@ -57,8 +57,18 @@ def get_admin_main_menu() -> ReplyKeyboardMarkup:
     builder.button(text="Ключи")
     builder.button(text="Рассылка")
     builder.button(text="Статистика")
-    builder.adjust(2, 2, 1)
+    builder.button(text="Очистить пользователей")
+    builder.adjust(2, 2, 1, 1)
     return builder.as_markup(resize_keyboard=True)
+
+
+def get_clear_users_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Подтверждение очистки всех пользователей."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Да, удалить всех", callback_data="clear_users_confirm")
+    builder.button(text="Отмена", callback_data="clear_users_cancel")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 # ---------------------------------------------------------------------------

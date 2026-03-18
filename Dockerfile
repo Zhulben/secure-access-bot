@@ -34,5 +34,8 @@ RUN adduser --disabled-password --gecos "" botuser \
 
 USER botuser
 
+# Путь для импорта пакета bot при запуске alembic
+ENV PYTHONPATH=/app
+
 # По умолчанию — запуск бота
 CMD ["python", "-m", "bot.main"]

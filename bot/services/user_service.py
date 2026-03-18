@@ -5,7 +5,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import delete as sql_delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.enums import UserRole, UserStatus
@@ -156,6 +156,17 @@ async def get_users_count_by_status(session: AsyncSession) -> dict[str, int]:
         select(User.status, func.count(User.id)).group_by(User.status)
     )
     return {str(row[0]): row[1] for row in result.all()}
+
+
+async def clear_all_users(session: AsyncSession, except_telegram_id: int) -> int:
+    """Удалить всех пользователей кроме указанного. Возвращает количество удалённых."""
+    result = await session.execute(
+        sql_delete(User).where(User.telegram_id != except_telegram_id)
+    )
+    await session.flush()
+    count = result.rowcount
+    logger.info("Очищено пользователей: %d (кроме tg_id=%s)", count, except_telegram_id)
+    return count
 
 
 async def search_users(
